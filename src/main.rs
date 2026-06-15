@@ -1,4 +1,3 @@
-use image::GenericImageView;
 use rusqlite::{params, Connection, Result};
 use std::fmt;
 use std::fs;
@@ -29,18 +28,13 @@ impl fmt::Display for ImageData {
 /// Determine the orientation of an image based on its dimensions.
 /// Returns (width, height, orientation_string).
 fn img_orient<P: AsRef<Path>>(img_path: P) -> Result<(u32, u32, String), String> {
-    match image::open(&img_path) {
-        Ok(img) => {
-            let (width, height) = img.dimensions();
-
+    match image::image_dimensions(&img_path) {
+        Ok((width, height)) => {
             let orientation = if width > height {
-                println!("Landscape");
                 "landscape".to_string()
             } else if width < height {
-                println!("Portrait");
                 "portrait".to_string()
             } else {
-                println!("Square");
                 "square".to_string()
             };
 
@@ -112,8 +106,6 @@ fn walk_img_dir<P: AsRef<Path>>(db_path: P, directory: P) -> Result<(), rusqlite
                                 width,
                                 height,
                             };
-
-                            println!("{}", image_data);
 
                             let insert_sql = "
                                 INSERT INTO images (Name, Path, Http, Idx, Orientation, Width, Height) 
