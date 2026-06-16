@@ -1,40 +1,31 @@
+use clap::Parser;
 use rusqlite::{params, Connection};
-use std::env;
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
 
-struct SetupConfig {
+#[derive(Parser)]
+#[command(about = "Scan a directory of JPEG images and populate a SQLite database")]
+struct Args {
+    /// Path to the SQLite database file
+    #[arg(long)]
     db_path: String,
+
+    /// Directory to scan for JPEG images
+    #[arg(long)]
     image_dir: String,
+
+    /// Base directory prefix to strip when constructing HTTP paths
+    #[arg(long)]
     image_base_dir: String,
+
+    /// HTTP path prefix to prepend after stripping the base directory
+    #[arg(long)]
     http_prefix: String,
+
+    /// Whether to delete all existing rows before inserting (true or false)
+    #[arg(long)]
     reset_db: bool,
-}
-
-fn env_or_default(name: &str, default_value: &str) -> String {
-    env::var(name).unwrap_or_else(|_| default_value.to_string())
-}
-
-fn parse_bool_env(name: &str, default_value: bool) -> bool {
-    match env::var(name) {
-        Ok(v) => {
-            let normalized = v.trim().to_ascii_lowercase();
-            normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
-        }
-        Err(_) => default_value,
-    }
-}
-
-fn load_config() -> SetupConfig {
-    let image_dir = env_or_default("SETUP_IMAGE_DIR", "/home/pimedia/Pictures/MASTERPICS/");
-    SetupConfig {
-        db_path: env_or_default("SETUP_DB_PATH", "/home/pimedia/go/imagesDB"),
-        image_base_dir: env_or_default("SETUP_IMAGE_BASE_DIR", &image_dir),
-        http_prefix: env_or_default("SETUP_HTTP_PREFIX", "/static/"),
-        reset_db: parse_bool_env("SETUP_RESET_DB", true),
-        image_dir,
-    }
 }
 
 /// Determine the orientation of an image based on its dimensions.
@@ -203,7 +194,7 @@ fn walk_img_dir(
 }
 
 fn main() {
-    let cfg = load_config();
+    let cfg = Args::parse();
 
     println!(
         "Setup config: db_path={}, image_dir={}, image_base_dir={}, http_prefix={}, reset_db={}",

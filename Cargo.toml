@@ -7,6 +7,7 @@ edition = "2024"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 image = { version = "0.25.0", default-features = false, features = ["jpeg"] }
 walkdir = "2.5.0"
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 opt-level = 3
