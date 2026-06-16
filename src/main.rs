@@ -1,41 +1,19 @@
-use rusqlite::{params, Connection, Result};
-use std::fmt;
+use rusqlite::{params, Connection};
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
 
-#[derive(Debug)]
-struct ImageData {
-    name: String,
-    path: String,
-    http: String,
-    idx: i32,
-    orientation: String,
-    width: u32,
-    height: u32,
-}
-
-impl fmt::Display for ImageData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ImageData(name='{}', path='{}', http='{}', idx={}, orientation='{}', width={}, height={})",
-            self.name, self.path, self.http, self.idx, self.orientation, self.width, self.height
-        )
-    }
-}
-
 /// Determine the orientation of an image based on its dimensions.
 /// Returns (width, height, orientation_string).
-fn img_orient<P: AsRef<Path>>(img_path: P) -> Result<(u32, u32, String), String> {
+fn img_orient<P: AsRef<Path>>(img_path: P) -> std::result::Result<(u32, u32, &'static str), String> {
     match image::image_dimensions(&img_path) {
         Ok((width, height)) => {
             let orientation = if width > height {
-                "landscape".to_string()
+                "landscape"
             } else if width < height {
-                "portrait".to_string()
+                "portrait"
             } else {
-                "square".to_string()
+                "square"
             };
 
             Ok((width, height, orientation))
@@ -49,7 +27,7 @@ fn img_orient<P: AsRef<Path>>(img_path: P) -> Result<(u32, u32, String), String>
 }
 
 /// Create the images table in the SQLite database if it doesn't exist.
-fn create_img_db_table<P: AsRef<Path>>(db_path: P) -> Result<()> {
+fn create_img_db_table<P: AsRef<Path>>(db_path: P) -> rusqlite::Result<()> {
     let conn = Connection::open(db_path)?;
 
     let create_table_sql = "
@@ -69,25 +47,47 @@ fn create_img_db_table<P: AsRef<Path>>(db_path: P) -> Result<()> {
 
 /// Convert file system path to HTTP path by replacing the base directory.
 fn create_http_path(fpath: &str) -> String {
-    fpath.replace("/home/pimedia/Pictures/MASTERPICS/", "/static/")
+    if let Some(suffix) = fpath.strip_prefix("/home/pimedia/Pictures/MASTERPICS/") {
+        let mut out = String::with_capacity(suffix.len() + "/static/".len());
+        out.push_str("/static/");
+        out.push_str(suffix);
+        out
+    } else {
+        fpath.to_owned()
+    }
 }
 
 /// Walk through the directory, find JPEG images, and insert their data into the database.
 fn walk_img_dir<P: AsRef<Path>>(db_path: P, directory: P) -> Result<(), rusqlite::Error> {
-    let mut idx = 0;
-    let mut failed_images = Vec::new();
+    let mut idx: i32 = 0;
+    let mut failed_count: usize = 0;
+    let mut failed_samples: Vec<String> = Vec::new();
 
     let mut conn = Connection::open(db_path)?;
+    conn.execute_batch(
+        "
+        PRAGMA synchronous = OFF;
+        PRAGMA journal_mode = MEMORY;
+        PRAGMA temp_store = MEMORY;
+        PRAGMA cache_size = -65536;
+        ",
+    )?;
+
     let tx = conn.transaction()?; // Using a transaction for significantly faster batch inserts
+    let mut stmt = tx.prepare(
+        "
+        INSERT INTO images (Name, Path, Http, Idx, Orientation, Width, Height)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ",
+    )?;
 
     for entry in WalkDir::new(directory).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
 
         if path.is_file() {
-            idx += 1;
-
             if let Some(ext) = path.extension() {
-                if ext.to_string_lossy().to_lowercase() == "jpg" {
+                if ext.eq_ignore_ascii_case("jpg") {
+                    idx += 1;
                     let file_path_str = path.to_string_lossy().into_owned();
                     let file_name = path
                         .file_name()
@@ -97,39 +97,31 @@ fn walk_img_dir<P: AsRef<Path>>(db_path: P, directory: P) -> Result<(), rusqlite
 
                     match img_orient(path) {
                         Ok((width, height, orientation)) => {
-                            let image_data = ImageData {
-                                name: file_name,
-                                http: create_http_path(&file_path_str),
-                                path: file_path_str,
-                                idx,
-                                orientation,
-                                width,
-                                height,
-                            };
+                            let http_path = create_http_path(&file_path_str);
 
-                            let insert_sql = "
-                                INSERT INTO images (Name, Path, Http, Idx, Orientation, Width, Height) 
-                                VALUES (?, ?, ?, ?, ?, ?, ?)";
-
-                            if let Err(e) = tx.execute(
-                                insert_sql,
-                                params![
-                                    image_data.name,
-                                    image_data.path,
-                                    image_data.http,
-                                    image_data.idx,
-                                    image_data.orientation,
-                                    image_data.width,
-                                    image_data.height,
-                                ],
-                            ) {
-                                println!("Database insert error for {}: {}", image_data.path, e);
-                                failed_images.push(image_data.path);
+                            if stmt
+                                .execute(params![
+                                    file_name,
+                                    file_path_str,
+                                    http_path,
+                                    idx,
+                                    orientation,
+                                    width,
+                                    height,
+                                ])
+                                .is_err()
+                            {
+                                failed_count += 1;
+                                if failed_samples.len() < 10 {
+                                    failed_samples.push(path.to_string_lossy().into_owned());
+                                }
                             }
                         }
-                        Err(e) => {
-                            println!("Skipping image: {}", e);
-                            failed_images.push(file_path_str);
+                        Err(_) => {
+                            failed_count += 1;
+                            if failed_samples.len() < 10 {
+                                failed_samples.push(file_path_str);
+                            }
                         }
                     }
                 }
@@ -137,13 +129,18 @@ fn walk_img_dir<P: AsRef<Path>>(db_path: P, directory: P) -> Result<(), rusqlite
         }
     }
 
+    drop(stmt);
+
     tx.commit()?;
 
     // Print summary of failed images
     println!("\n--- Summary ---");
-    if !failed_images.is_empty() {
-        println!("Failed to process {} image(s):", failed_images.len());
-        for failed_img in failed_images {
+    if failed_count > 0 {
+        println!("Failed to process {} image(s)", failed_count);
+        if !failed_samples.is_empty() {
+            println!("Sample failures (first {}):", failed_samples.len());
+        }
+        for failed_img in failed_samples {
             println!("  - {}", failed_img);
         }
     } else {
