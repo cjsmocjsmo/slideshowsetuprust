@@ -1,7 +1,41 @@
 use rusqlite::{params, Connection};
+use std::env;
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
+
+struct SetupConfig {
+    db_path: String,
+    image_dir: String,
+    image_base_dir: String,
+    http_prefix: String,
+    reset_db: bool,
+}
+
+fn env_or_default(name: &str, default_value: &str) -> String {
+    env::var(name).unwrap_or_else(|_| default_value.to_string())
+}
+
+fn parse_bool_env(name: &str, default_value: bool) -> bool {
+    match env::var(name) {
+        Ok(v) => {
+            let normalized = v.trim().to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
+        }
+        Err(_) => default_value,
+    }
+}
+
+fn load_config() -> SetupConfig {
+    let image_dir = env_or_default("SETUP_IMAGE_DIR", "/home/pimedia/Pictures/MASTERPICS/");
+    SetupConfig {
+        db_path: env_or_default("SETUP_DB_PATH", "/home/pimedia/go/imagesDB"),
+        image_base_dir: env_or_default("SETUP_IMAGE_BASE_DIR", &image_dir),
+        http_prefix: env_or_default("SETUP_HTTP_PREFIX", "/static/"),
+        reset_db: parse_bool_env("SETUP_RESET_DB", true),
+        image_dir,
+    }
+}
 
 /// Determine the orientation of an image based on its dimensions.
 /// Returns (width, height, orientation_string).
@@ -27,7 +61,7 @@ fn img_orient<P: AsRef<Path>>(img_path: P) -> std::result::Result<(u32, u32, &'s
 }
 
 /// Create the images table in the SQLite database if it doesn't exist.
-fn create_img_db_table<P: AsRef<Path>>(db_path: P) -> rusqlite::Result<()> {
+fn create_img_db_table(db_path: &Path) -> rusqlite::Result<()> {
     let conn = Connection::open(db_path)?;
 
     let create_table_sql = "
@@ -46,11 +80,19 @@ fn create_img_db_table<P: AsRef<Path>>(db_path: P) -> rusqlite::Result<()> {
 }
 
 /// Convert file system path to HTTP path by replacing the base directory.
-fn create_http_path(fpath: &str) -> String {
-    if let Some(suffix) = fpath.strip_prefix("/home/pimedia/Pictures/MASTERPICS/") {
-        let mut out = String::with_capacity(suffix.len() + "/static/".len());
-        out.push_str("/static/");
-        out.push_str(suffix);
+fn create_http_path(fpath: &str, image_base_dir: &str, http_prefix: &str) -> String {
+    let normalized_base = image_base_dir.trim_end_matches('/');
+    let normalized_prefix = if http_prefix.ends_with('/') {
+        http_prefix.to_string()
+    } else {
+        format!("{}/", http_prefix)
+    };
+
+    if let Some(suffix) = fpath.strip_prefix(normalized_base) {
+        let cleaned_suffix = suffix.trim_start_matches('/');
+        let mut out = String::with_capacity(cleaned_suffix.len() + normalized_prefix.len());
+        out.push_str(&normalized_prefix);
+        out.push_str(cleaned_suffix);
         out
     } else {
         fpath.to_owned()
@@ -58,7 +100,13 @@ fn create_http_path(fpath: &str) -> String {
 }
 
 /// Walk through the directory, find JPEG images, and insert their data into the database.
-fn walk_img_dir<P: AsRef<Path>>(db_path: P, directory: P) -> Result<(), rusqlite::Error> {
+fn walk_img_dir(
+    db_path: &Path,
+    directory: &Path,
+    image_base_dir: &str,
+    http_prefix: &str,
+    reset_db: bool,
+) -> Result<(), rusqlite::Error> {
     let mut idx: i32 = 0;
     let mut failed_count: usize = 0;
     let mut failed_samples: Vec<String> = Vec::new();
@@ -74,6 +122,10 @@ fn walk_img_dir<P: AsRef<Path>>(db_path: P, directory: P) -> Result<(), rusqlite
     )?;
 
     let tx = conn.transaction()?; // Using a transaction for significantly faster batch inserts
+    if reset_db {
+        tx.execute("DELETE FROM images", [])?;
+    }
+
     let mut stmt = tx.prepare(
         "
         INSERT INTO images (Name, Path, Http, Idx, Orientation, Width, Height)
@@ -97,7 +149,7 @@ fn walk_img_dir<P: AsRef<Path>>(db_path: P, directory: P) -> Result<(), rusqlite
 
                     match img_orient(path) {
                         Ok((width, height, orientation)) => {
-                            let http_path = create_http_path(&file_path_str);
+                            let http_path = create_http_path(&file_path_str, image_base_dir, http_prefix);
 
                             if stmt
                                 .execute(params![
@@ -151,8 +203,15 @@ fn walk_img_dir<P: AsRef<Path>>(db_path: P, directory: P) -> Result<(), rusqlite
 }
 
 fn main() {
-    let db_path = "/home/pimedia/go/imagesDB";
-    let image_dir = "/home/pimedia/Pictures/MASTERPICS/";
+    let cfg = load_config();
+
+    println!(
+        "Setup config: db_path={}, image_dir={}, image_base_dir={}, http_prefix={}, reset_db={}",
+        cfg.db_path, cfg.image_dir, cfg.image_base_dir, cfg.http_prefix, cfg.reset_db
+    );
+
+    let db_path = Path::new(&cfg.db_path);
+    let image_dir = Path::new(&cfg.image_dir);
 
     // Ensure parent directory for database exists
     if let Some(parent) = Path::new(db_path).parent() {
@@ -167,7 +226,16 @@ fn main() {
         return;
     }
 
-    if let Err(e) = walk_img_dir(db_path, image_dir) {
+    if let Err(e) = walk_img_dir(
+        db_path,
+        image_dir,
+        &cfg.image_base_dir,
+        &cfg.http_prefix,
+        cfg.reset_db,
+    ) {
         eprintln!("Database error: {}", e);
+        return;
     }
+
+    println!("Database setup complete.");
 }
