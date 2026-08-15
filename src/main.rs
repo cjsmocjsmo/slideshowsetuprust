@@ -1,8 +1,12 @@
 use clap::{ArgGroup, Parser};
 use rusqlite::{params, Connection};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use walkdir::WalkDir;
+
+/// Print progress at a fixed interval so long scans (e.g. over NFS) don't look hung.
+const PROGRESS_INTERVAL: usize = 100;
 
 #[derive(Parser)]
 #[command(about = "Scan a directory of JPEG images and populate a SQLite database")]
@@ -157,6 +161,10 @@ fn walk_img_dir(
 
         if path.is_file() && is_jpeg_path(path) {
             idx += 1;
+            if idx as usize % PROGRESS_INTERVAL == 0 {
+                println!("Scanned {} images so far...", idx);
+                let _ = std::io::stdout().flush();
+            }
             let file_path_str = path.to_string_lossy().into_owned();
             let file_name = path
                 .file_name()
@@ -258,6 +266,10 @@ fn walk_img_dir_update(
 
         if path.is_file() && is_jpeg_path(path) {
             scanned_count += 1;
+            if scanned_count % PROGRESS_INTERVAL == 0 {
+                println!("Scanned {} images so far...", scanned_count);
+                let _ = std::io::stdout().flush();
+            }
             let file_path_str = path.to_string_lossy().into_owned();
 
             let exists = exists_stmt.exists([file_path_str.as_str()])?;
